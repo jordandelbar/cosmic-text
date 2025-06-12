@@ -14,8 +14,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::fallback::FontFallbackIter;
 use crate::{
-    math, Align, AttrsList, CacheKeyFlags, Color, FeatureTag, Font, FontSystem, LayoutGlyph, LayoutLine,
-    Metrics, Wrap,
+    math, Align, AttrsList, CacheKeyFlags, Color, FeatureTag, Font, FontSystem, LayoutGlyph,
+    LayoutLine, Metrics, Wrap,
 };
 
 /// The shaping strategy of some text.
@@ -77,6 +77,7 @@ impl Shaping {
 }
 
 /// A set of buffers containing allocations for shaped text.
+#[derive(Default)]
 pub struct ShapeBuffer {
     /// Buffer for holding unicode text.
     rustybuzz_buffer: Option<rustybuzz::UnicodeBuffer>,
@@ -98,7 +99,7 @@ pub struct ShapeBuffer {
     glyph_sets: Vec<Vec<LayoutGlyph>>,
 
     /// Cache for ligature detection results.
-    /// Key: (font_id_hash, text_hash), Value: whether text forms ligatures
+    /// Key: (`font_id_hash`, `text_hash`), Value: whether text forms ligatures
     ligature_cache: HashMap<(u64, u64), bool>,
 }
 
@@ -108,26 +109,11 @@ impl fmt::Debug for ShapeBuffer {
     }
 }
 
-impl Default for ShapeBuffer {
-    fn default() -> Self {
-        Self {
-            rustybuzz_buffer: None,
-            scripts: Vec::new(),
-            spans: Vec::new(),
-            words: Vec::new(),
-            visual_lines: Vec::new(),
-            cached_visual_lines: Vec::new(),
-            glyph_sets: Vec::new(),
-            ligature_cache: HashMap::new(),
-        }
-    }
-}
-
 /// Hash function for text to use in ligature cache
 fn hash_text(text: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
@@ -778,6 +764,10 @@ impl ShapeSpan {
     /// See [`Self::new`].
     ///
     /// Reuses as much of the pre-existing internal allocations as possible.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if no font matches are found for the text attributes.
     pub fn build(
         &mut self,
         font_system: &mut FontSystem,
@@ -810,14 +800,19 @@ impl ShapeSpan {
 
         let mut start_word = 0;
         let linebreaks: Vec<_> = unicode_linebreak::linebreaks(span).collect();
-        
+
         // Get font for ligature testing
         let attrs = attrs_list.get_span(span_range.start);
         let fonts = font_system.get_font_matches(&attrs);
         let font_key = fonts.first().expect("no font found");
         let font = font_system.get_font(font_key.id).expect("font not found");
-        
-        let merged_breaks = merge_ligature_breaks(&linebreaks, span, &font, &mut font_system.shape_buffer.ligature_cache);
+
+        let merged_breaks = merge_ligature_breaks(
+            &linebreaks,
+            span,
+            &font,
+            &mut font_system.shape_buffer.ligature_cache,
+        );
 
         for (end_lb, _) in merged_breaks {
             let mut start_lb = end_lb;
@@ -926,9 +921,9 @@ impl ShapeSpan {
 /// # Performance
 ///
 /// The font-based approach includes caching to minimize performance impact:
-/// - Results are cached by (font_id_hash, text_hash) pairs
+/// - Results are cached by (`font_id_hash`, `text_hash`) pairs
 /// - Avoids repeated expensive shaping operations
-/// - Cache hits are very fast HashMap lookups
+/// - Cache hits are very fast `HashMap` lookups
 fn merge_ligature_breaks(
     breaks: &[(usize, unicode_linebreak::BreakOpportunity)],
     span: &str,
@@ -1007,7 +1002,7 @@ fn merge_ligature_breaks(
 /// # Arguments
 /// * `text` - The text to check for ligature patterns
 /// * `font` - The font to test ligature formation with
-/// * `ligature_cache` - Cache to store and retrieve results (key: font_id_hash + text_hash)
+/// * `ligature_cache` - Cache to store and retrieve results (key: `font_id_hash` + `text_hash`)
 ///
 /// # Returns
 /// `true` if the text forms ligatures with the given font
@@ -1017,11 +1012,15 @@ fn merge_ligature_breaks(
 /// ```ignore
 /// // This will return true for fonts like FiraCode, JetBrains Mono, etc.
 /// let forms_ligatures = contains_ligature_pattern("->", &font, &mut cache);
-/// 
+///
 /// // This will typically return false for most fonts
 /// let forms_ligatures = contains_ligature_pattern("hello", &font, &mut cache);
 /// ```
-fn contains_ligature_pattern(text: &str, font: &Font, ligature_cache: &mut HashMap<(u64, u64), bool>) -> bool {
+fn contains_ligature_pattern(
+    text: &str,
+    font: &Font,
+    ligature_cache: &mut HashMap<(u64, u64), bool>,
+) -> bool {
     let font_id = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -1045,8 +1044,6 @@ fn contains_ligature_pattern(text: &str, font: &Font, ligature_cache: &mut HashM
 
     forms_ligatures
 }
-
-
 
 /// A shaped line (or paragraph)
 #[derive(Clone, Debug)]
@@ -1902,7 +1899,7 @@ mod tests {
         if let Some(font_key) = fonts.first() {
             if let Some(font) = font_system.get_font(font_key.id) {
                 let mut cache = HashMap::new();
-                
+
                 // Test that common ligature patterns might be detected (depends on font)
                 // Note: Results may vary based on the actual font capabilities
                 let test_patterns = ["->", "<=", "!=", "=="];
@@ -1922,15 +1919,15 @@ mod tests {
     #[test]
     fn test_merge_ligature_breaks() {
         use unicode_linebreak::BreakOpportunity;
-        
+
         let mut font_system = FontSystem::new();
         let attrs = Attrs::new().family(Family::Monospace);
         let fonts = font_system.get_font_matches(&attrs);
-        
+
         if let Some(font_key) = fonts.first() {
             if let Some(font) = font_system.get_font(font_key.id) {
                 let mut cache = HashMap::new();
-                
+
                 // Test with breaks that might be merged
                 let breaks = vec![
                     (0, BreakOpportunity::Mandatory),
@@ -1966,15 +1963,15 @@ mod tests {
     #[test]
     fn test_ligature_word_preservation() {
         use unicode_linebreak::BreakOpportunity;
-        
+
         let mut font_system = FontSystem::new();
         let attrs = Attrs::new().family(Family::Monospace);
         let fonts = font_system.get_font_matches(&attrs);
-        
+
         if let Some(font_key) = fonts.first() {
             if let Some(font) = font_system.get_font(font_key.id) {
                 let mut cache = HashMap::new();
-                
+
                 // Test that potential ligature patterns cause line breaks to be processed
                 let test_cases = vec![
                     (
@@ -2016,15 +2013,15 @@ mod tests {
     #[test]
     fn test_non_ligature_breaks_unchanged() {
         use unicode_linebreak::BreakOpportunity;
-        
+
         let mut font_system = FontSystem::new();
         let attrs = Attrs::new().family(Family::Monospace);
         let fonts = font_system.get_font_matches(&attrs);
-        
+
         if let Some(font_key) = fonts.first() {
             if let Some(font) = font_system.get_font(font_key.id) {
                 let mut cache = HashMap::new();
-                
+
                 // Test that non-ligature text doesn't have breaks merged unnecessarily
                 let test_cases = vec![
                     (
